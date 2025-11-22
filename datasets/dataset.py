@@ -141,13 +141,14 @@ class TyphoonDataset(Dataset):
             lr_inputs.append(lr_input)
 
         return {
-            # 生成器输入 (List of 3 tensors: t-1, t, t+1)
-            'lr_inputs': lr_inputs, 
+            # 修改 1: 将 list stack 成 tensor [3, C, H, W] -> [T, C, H, W]
+            # 对应 train.py 中的 dimensions: B, T, C, H, W
+            'lr_stack': torch.stack(lr_inputs), 
             
-            # 判别器真值 / Loss计算 (List of 3 tensors: t-1, t, t+1)
-            'hr_imgs': hr_imgs,
+            # 修改 2: 将 list stack 成 tensor [3, 1, 512, 512]
+            'hr_stack': torch.stack(hr_imgs),
             
-            # 时间判别器需要的 Warp 场 (都是 t 时刻发出的)
+            # 时间判别器需要的 Warp 场
             'flow_bwd': hr_flow_curr_bwd, # [2, 512, 512]
             'flow_fwd': hr_flow_curr_fwd  # [2, 512, 512]
         }

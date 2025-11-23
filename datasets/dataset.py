@@ -152,3 +152,84 @@ class TyphoonDataset(Dataset):
             'flow_bwd': hr_flow_curr_bwd, # [2, 512, 512]
             'flow_fwd': hr_flow_curr_fwd  # [2, 512, 512]
         }
+    
+class PhyTyphoonDataset(Dataset):
+    def __init__(self, json_path, root_dir, scale_factor=4):
+        """
+        PhyTyphoonDataset: 专门配合 PhyTempoGAN 使用
+        不再需要 flow_dir，完全依赖图像序列
+        
+        Args:
+            json_path: 三元组 JSON 路径
+            root_dir: 图片根目录
+            scale_factor: 下采样倍率 (默认 4: 512 -> 128)
+        """
+        self.root_dir = root_dir
+        self.scale_factor = scale_factor
+        
+        with open(json_path, 'r') as f:
+            self.triplets = json.load(f)
+
+    def __len__(self):
+        return len(self.triplets)
+
+    def _load_img(self, path):
+        """加载图片，归一化到 [-1, 1]"""
+        # 1. Load as Grayscale
+        try:
+            img = Image.open(path).convert('L')
+        except Exception as e:
+            print(f"Error loading image: {path}, {e}")
+            # 返回一个全黑图防止崩溃，或者抛出异常
+            return torch.zeros(1, 512, 512) - 1.0
+
+        img_np = np.array(img)
+        
+        # 2. To Tensor [1, H, W] and Normalize to [-1, 1]
+        img_tensor = torch.from_numpy(img_np).float().unsqueeze(0)
+        img_tensor = (img_tensor / 127.5) - 1.0
+        
+        return img_tensor
+
+    def _downsample(self, tensor):
+        """
+        下采样 Tensor [1, H, W] -> [1, H/s, W/s]
+        使用 area 插值以保持物理量的守恒（类似平均池化）
+        """
+        t = tensor.unsqueeze(0) # [1, 1, H, W]
+        
+        downsampled = F.interpolate(
+            t, 
+            scale_factor=1/self.scale_factor, 
+            mode='area', 
+            recompute_scale_factor=True
+        ).squeeze(0)
+            
+        return downsampled
+
+    def __getitem__(self, idx):
+        # 获取三元组路径 [t-1, t, t+1]
+        path_prev, path_curr, path_next = self.triplets[idx]
+        paths = [path_prev, path_curr, path_next]
+        
+        hr_seq_list = []
+        lr_seq_list = []
+        
+        for p in paths:
+            # 1. 加载高分原图 (Ground Truth)
+            hr_img = self._load_img(p) # [1, 512, 512]
+            hr_seq_list.append(hr_img)
+            
+            # 2. 生成低分输入 (Input)
+            lr_img = self._downsample(hr_img) # [1, 128, 128]
+            lr_seq_list.append(lr_img)
+            
+        # 堆叠时间维度
+        # Output: [3, 1, H, W]
+        hr_stack = torch.stack(hr_seq_list) 
+        lr_stack = torch.stack(lr_seq_list)
+        
+        return {
+            'lr_seq': lr_stack,  # [3, 1, 128, 128] -> 给 Generator
+            'hr_seq': hr_stack   # [3, 1, 512, 512] -> 给 Discriminator 和 Loss
+        }

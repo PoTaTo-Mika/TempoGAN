@@ -48,3 +48,7 @@ root/
 目前的数据结构：data/digital_typhoon下保留着和先前所述一致的数据结构，json是根据现有数据构建的三元组，也对每个三元组都提取出了光流数据，光流数据被储存在outputs/flow当中。
 
 更新一下，现在光流已经提取完毕了，接下来准备完成dataset和train
+
+## 训练信息
+
+数据：2020 2021 2022 三年的digital typhoon数据，被convert成灰度图。

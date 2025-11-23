@@ -1,0 +1,33 @@
+{
+    "experiment_name": "typhoon_phygan_v1",
+    "paths": {
+        "data_root": "./data/digital_typhoon",
+        "json_path": "./data/output.json",
+        "checkpoint_dir": "./checkpoints/phygan_v1",
+        "log_dir": "./logs/phygan_v1",
+        "sample_dir": "./samples/phygan_v1"
+    },
+    "training": {
+        "batch_size": 4,
+        "num_epochs": 50,
+        "num_workers": 4,
+        "learning_rate": {
+            "g": 2e-4,
+            "d": 2e-4
+        },
+        "betas": [0.5, 0.999],
+        "save_interval": 5000,
+        "eval_interval": 1000,
+        "log_interval": 100
+    },
+    "loss_weights": {
+        "lambda_l1": 5.0,
+        "lambda_feat": 10.0,
+        "lambda_adv": 1.0
+    },
+    "model": {
+        "scale_factor": 4,
+        "in_channels": 1,
+        "base_channels": 64
+    }
+}

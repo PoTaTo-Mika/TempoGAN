@@ -19,68 +19,60 @@ from utils.utils import save_checkpoint, save_sample_images, AverageMeter
 # PhyGAN Loss: 专门为 PhyTempoGAN 定制的损失函数
 # ==============================================================================
 class PhyGANLoss(nn.Module):
-    def __init__(self, device, lambda_l1=10.0, lambda_feat=10.0, lambda_adv=1.0):
+    def __init__(self, device, lambda_l1=10.0, lambda_feat=5.0, lambda_adv=1.0): # 注意：降低了 feat 权重
         super(PhyGANLoss, self).__init__()
         self.device = device
         self.lambda_l1 = lambda_l1
         self.lambda_feat = lambda_feat
         self.lambda_adv = lambda_adv
         
-        self.criterion_gan = nn.BCEWithLogitsLoss()
         self.criterion_l1 = nn.L1Loss()
         self.criterion_feat = nn.MSELoss()
+        # 移除了 self.criterion_gan = BCE...
 
-    def get_labels(self, preds, target_is_real):
-        return torch.ones_like(preds, device=self.device) if target_is_real else torch.zeros_like(preds, device=self.device)
-
-    def calc_ds_loss(self, D_s, lr_center_up, hr_center, gen_center):
-        """空间判别器损失"""
-        # Real
-        pred_real, _ = D_s(lr_center_up, hr_center)
-        loss_real = self.criterion_gan(pred_real, self.get_labels(pred_real, True))
+    def calc_ds_loss(self, D_s, lr, hr, fake):
+        # Hinge Loss 判别器部分
+        # 真实样本要求 D(x) > 1, 虚假样本要求 D(G(z)) < -1
+        real_pred, _ = D_s(lr, hr)
+        fake_pred, _ = D_s(lr, fake.detach())
         
-        # Fake
-        pred_fake, _ = D_s(lr_center_up, gen_center.detach())
-        loss_fake = self.criterion_gan(pred_fake, self.get_labels(pred_fake, False))
+        # ReLU 相当于 max(0, ...)
+        loss_real = torch.mean(torch.nn.functional.relu(1.0 - real_pred))
+        loss_fake = torch.mean(torch.nn.functional.relu(1.0 + fake_pred))
         
-        return (loss_real + loss_fake) * 0.5
+        return loss_real + loss_fake
 
     def calc_dt_loss(self, D_t, real_seq, fake_seq):
-        """
-        时间判别器损失 (3D CNN)
-        Input: [B, 1, T=3, H, W]
-        """
-        # Real Sequence
-        pred_real = D_t(real_seq)
-        loss_real = self.criterion_gan(pred_real, self.get_labels(pred_real, True))
+        # Temporal 也是一样
+        real_pred = D_t(real_seq)
+        fake_pred = D_t(fake_seq.detach())
         
-        # Fake Sequence (拼接得来)
-        pred_fake = D_t(fake_seq.detach())
-        loss_fake = self.criterion_gan(pred_fake, self.get_labels(pred_fake, False))
+        loss_real = torch.mean(torch.nn.functional.relu(1.0 - real_pred))
+        loss_fake = torch.mean(torch.nn.functional.relu(1.0 + fake_pred))
         
-        return (loss_real + loss_fake) * 0.5
+        return loss_real + loss_fake
 
-    def calc_g_loss(self, D_s, D_t, lr_center_up, hr_center, gen_center, fake_seq):
-        """生成器总损失"""
+    def calc_g_loss(self, D_s, D_t, lr, hr, gen, fake_seq):
         logs = {}
         
-        # 1. Adversarial Loss (Spatial)
-        pred_fake_s, feat_fake_s = D_s(lr_center_up, gen_center)
-        loss_adv_s = self.criterion_gan(pred_fake_s, self.get_labels(pred_fake_s, True))
+        # 1. Adversarial Loss (Hinge for Generator)
+        # G 希望 D(G(z)) 越大越好 ( > 0)
+        pred_fake_s, feat_fake_s = D_s(lr, gen)
+        loss_adv_s = -torch.mean(pred_fake_s)  # 直接取负均值
         
-        # 2. Adversarial Loss (Temporal)
         pred_fake_t = D_t(fake_seq)
-        loss_adv_t = self.criterion_gan(pred_fake_t, self.get_labels(pred_fake_t, True))
+        loss_adv_t = -torch.mean(pred_fake_t)
         
-        # 3. L1 Pixel Loss
-        loss_l1 = self.criterion_l1(gen_center, hr_center)
+        # 2. L1 Loss
+        loss_l1 = self.criterion_l1(gen, hr)
         
-        # 4. Feature Matching Loss (Perceptual Loss)
+        # 3. Feature Matching Loss
         with torch.no_grad():
-            _, feat_real_s = D_s(lr_center_up, hr_center)
+            _, feat_real_s = D_s(lr, hr)
             
         loss_feat = 0.0
-        weights = [1.0, 1.0, 1.0, 1.0]
+        # 对特征层的权重稍微做点衰减，高层特征更抽象，权重可以小一点
+        weights = [1.0, 1.0, 1.0, 1.0] 
         for i, (f_r, f_f) in enumerate(zip(feat_real_s, feat_fake_s)):
             loss_feat += self.criterion_feat(f_f, f_r) * weights[i]
             
@@ -90,13 +82,14 @@ class PhyGANLoss(nn.Module):
                       loss_l1 * self.lambda_l1 + 
                       loss_feat * self.lambda_feat)
         
+        # Logs
         logs['g_adv_s'] = loss_adv_s.item()
         logs['g_adv_t'] = loss_adv_t.item()
         logs['g_l1'] = loss_l1.item()
         logs['g_feat'] = loss_feat.item()
         
         return total_loss, logs
-
+    
 # ==============================================================================
 # Helper Functions
 # ==============================================================================

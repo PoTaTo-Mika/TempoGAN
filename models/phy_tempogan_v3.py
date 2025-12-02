@@ -213,8 +213,7 @@ class SpatialDiscriminator(nn.Module):
         self.final_layers = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(base_channels * 8, 1),
-            nn.Sigmoid() # 配合 BCELoss
+            nn.Linear(base_channels * 8, 1)
         )
         
     def forward(self, upsampled_low_res, high_res_candidate):
@@ -258,7 +257,6 @@ class TemporalDiscriminator3D(nn.Module):
             nn.AdaptiveAvgPool3d(1),
             nn.Flatten(),
             nn.Linear(base_channels * 8, 1),
-            nn.Sigmoid()
         )
 
     def forward(self, frame_sequence):

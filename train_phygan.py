@@ -197,7 +197,12 @@ def main():
     opt_Dt = optim.Adam(Dt.parameters(), lr=config['training']['learning_rate']['d'], betas=tuple(config['training']['betas']))
 
     # 4. Loss
-    criterion = PhyGANLoss(device, lambda_l1=5.0, lambda_feat=10.0, lambda_adv=1.0)
+    criterion = PhyGANLoss(
+        device, 
+        lambda_l1=config['loss_weights']['lambda_l1'],
+        lambda_feat=config['loss_weights']['lambda_feat'],
+        lambda_adv=config['loss_weights']['lambda_adv']
+    )
 
     # 5. Loop
     global_step = 0

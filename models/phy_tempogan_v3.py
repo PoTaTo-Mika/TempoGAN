@@ -186,34 +186,34 @@ class PhyGenerator(nn.Module):
 # =========================================================================
 # 判别器部分 (Discriminators)
 # =========================================================================
+from torch.nn.utils import spectral_norm
 
 class SpatialDiscriminator(nn.Module):
     def __init__(self, input_channels=2, base_channels=32):
         super(SpatialDiscriminator, self).__init__()
-        # 保持原版结构不变，用于判断单帧真实性
+        
         self.layer1 = nn.Sequential(
-            nn.Conv2d(input_channels, base_channels, 4, 2, 1),
+            spectral_norm(nn.Conv2d(input_channels, base_channels, 4, 2, 1)),
             nn.LeakyReLU(0.2, inplace=True)
         )
         self.layer2 = nn.Sequential(
-            nn.Conv2d(base_channels, base_channels * 2, 4, 2, 1),
-            nn.BatchNorm2d(base_channels * 2),
+            spectral_norm(nn.Conv2d(base_channels, base_channels * 2, 4, 2, 1)),
             nn.LeakyReLU(0.2, inplace=True)
         )
         self.layer3 = nn.Sequential(
-            nn.Conv2d(base_channels * 2, base_channels * 4, 4, 2, 1),
-            nn.BatchNorm2d(base_channels * 4),
+            spectral_norm(nn.Conv2d(base_channels * 2, base_channels * 4, 4, 2, 1)),
             nn.LeakyReLU(0.2, inplace=True)
         )
         self.layer4 = nn.Sequential(
-            nn.Conv2d(base_channels * 4, base_channels * 8, 4, 2, 1),
-            nn.BatchNorm2d(base_channels * 8),
+            spectral_norm(nn.Conv2d(base_channels * 4, base_channels * 8, 4, 2, 1)),
             nn.LeakyReLU(0.2, inplace=True)
         )
         self.final_layers = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(base_channels * 8, 1)
+            # === 修改点 1: 最后一层移除 spectral_norm ===
+            # 这允许输出值突破 [-1, 1] 的限制，对 Hinge Loss 至关重要
+            nn.Linear(base_channels * 8, 1) 
         )
         
     def forward(self, upsampled_low_res, high_res_candidate):
@@ -225,41 +225,61 @@ class SpatialDiscriminator(nn.Module):
         score = self.final_layers(f4)
         return score, [f1, f2, f3, f4]
 
-class TemporalDiscriminator3D(nn.Module):
-    """
-    替代原版的 Advection-based D_t
-    使用 3D 卷积直接判断序列的时空连贯性，无需光流
-    """
-    def __init__(self, input_channels=1, base_channels=32):
-        super(TemporalDiscriminator3D, self).__init__()
+
+class TemporalDiscriminator(nn.Module):
+    def __init__(self, input_channels=3, base_channels=32):
+        super(TemporalDiscriminator, self).__init__()
         
-        self.model = nn.Sequential(
-            # Input: [B, C, T=3, H, W]
-            # Layer 1: 压缩时间维度
-            nn.Conv3d(input_channels, base_channels, kernel_size=(3, 4, 4), stride=(1, 2, 2), padding=(0, 1, 1)),
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            # Layer 2
-            nn.Conv3d(base_channels, base_channels * 2, kernel_size=(1, 4, 4), stride=(1, 2, 2), padding=(0, 1, 1)),
-            nn.BatchNorm3d(base_channels * 2),
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            # Layer 3
-            nn.Conv3d(base_channels * 2, base_channels * 4, kernel_size=(1, 4, 4), stride=(1, 2, 2), padding=(0, 1, 1)),
-            nn.BatchNorm3d(base_channels * 4),
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            # Layer 4
-            nn.Conv3d(base_channels * 4, base_channels * 8, kernel_size=(1, 4, 4), stride=(1, 2, 2), padding=(0, 1, 1)),
-            nn.BatchNorm3d(base_channels * 8),
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            nn.AdaptiveAvgPool3d(1),
+        # input_channels 虽然传入 3，但在 forward 里我们会计算差分
+        # 变成 9 通道输入: [Img_t, Diff_prev, Diff_next] 或其他组合
+        # 简单起见，我们把 原始3帧 + 2个差分帧 = 5通道 堆叠
+        
+        actual_in_channels = 5 # t-1, t, t+1, (t)-(t-1), (t+1)-(t)
+        
+        self.layer1 = nn.Sequential(
+            spectral_norm(nn.Conv2d(actual_in_channels, base_channels, 4, 2, 1)),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
+        self.layer2 = nn.Sequential(
+            spectral_norm(nn.Conv2d(base_channels, base_channels * 2, 4, 2, 1)),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
+        self.layer3 = nn.Sequential(
+            spectral_norm(nn.Conv2d(base_channels * 2, base_channels * 4, 4, 2, 1)),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
+        self.layer4 = nn.Sequential(
+            spectral_norm(nn.Conv2d(base_channels * 4, base_channels * 8, 4, 2, 1)),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
+        self.final_layers = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(base_channels * 8, 1),
+            # === 修改点 1: 最后一层移除 spectral_norm ===
+            nn.Linear(base_channels * 8, 1)
         )
 
     def forward(self, frame_sequence):
-        # frame_sequence: [B, 3, 1, H, W] -> permute to [B, 1, 3, H, W] for Conv3d
-        x = frame_sequence.permute(0, 2, 1, 3, 4)
-        return self.model(x)
+        # frame_sequence: [B, 3, 1, H, W]
+        B, T, C, H, W = frame_sequence.size()
+        
+        # 拆分帧
+        f_prev = frame_sequence[:, 0] # [B, 1, H, W]
+        f_curr = frame_sequence[:, 1]
+        f_next = frame_sequence[:, 2]
+        
+        # === 修改点 2: 显式计算时序差分 (Motion Cues) ===
+        # 强迫判别器关注变化量
+        diff_prev = f_curr - f_prev
+        diff_next = f_next - f_curr
+        
+        # 拼接: [原始信息(3) + 运动信息(2)] = 5通道
+        # 在通道维度堆叠
+        x = torch.cat([f_prev, f_curr, f_next, diff_prev, diff_next], dim=1) # [B, 5, H, W]
+        
+        f1 = self.layer1(x)
+        f2 = self.layer2(f1)
+        f3 = self.layer3(f2)
+        f4 = self.layer4(f3)
+        score = self.final_layers(f4)
+        return score

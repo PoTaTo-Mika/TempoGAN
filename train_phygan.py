@@ -12,14 +12,14 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 # 引入模块
 from datasets.dataset import PhyTyphoonDataset
-from models.phy_tempogan import PhyGenerator, SpatialDiscriminator, TemporalDiscriminator3D
+from models.phy_tempogan_v3 import PhyGenerator, SpatialDiscriminator, TemporalDiscriminator
 from utils.utils import save_checkpoint, save_sample_images, AverageMeter
 
 # ==============================================================================
 # PhyGAN Loss: 专门为 PhyTempoGAN 定制的损失函数
 # ==============================================================================
 class PhyGANLoss(nn.Module):
-    def __init__(self, device, lambda_l1=10.0, lambda_feat=5.0, lambda_adv=1.0): 
+    def __init__(self, device, lambda_l1=10.0, lambda_feat=5.0, lambda_adv=1.0): # 注意：降低了 feat 权重
         super(PhyGANLoss, self).__init__()
         self.device = device
         self.lambda_l1 = lambda_l1
@@ -89,7 +89,6 @@ class PhyGANLoss(nn.Module):
         logs['g_feat'] = loss_feat.item()
         
         return total_loss, logs
-    
 # ==============================================================================
 # Helper Functions
 # ==============================================================================
@@ -170,7 +169,7 @@ def main():
     
     # Dt: Temporal Discriminator (3D)
     # 输入通道=1 (灰度序列)
-    Dt = TemporalDiscriminator3D(input_channels=1).to(device)
+    Dt = TemporalDiscriminator(input_channels=3).to(device)
 
     G.apply(weights_init)
     Ds.apply(weights_init)
@@ -190,12 +189,7 @@ def main():
     opt_Dt = optim.Adam(Dt.parameters(), lr=config['training']['learning_rate']['d'], betas=tuple(config['training']['betas']))
 
     # 4. Loss
-    criterion = PhyGANLoss(
-        device, 
-        lambda_l1=config['loss_weights']['lambda_l1'],
-        lambda_feat=config['loss_weights']['lambda_feat'],
-        lambda_adv=config['loss_weights']['lambda_adv']
-    )
+    criterion = PhyGANLoss(device, lambda_l1=config['loss_weights']['lambda_l1'], lambda_feat=config['loss_weights']['lambda_feat'], lambda_adv=config['loss_weights']['lambda_adv'])
 
     # 5. Loop
     global_step = 0

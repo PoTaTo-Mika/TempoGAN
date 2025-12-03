@@ -19,7 +19,7 @@ from utils.utils import save_checkpoint, save_sample_images, AverageMeter
 # PhyGAN Loss: 专门为 PhyTempoGAN 定制的损失函数
 # ==============================================================================
 class PhyGANLoss(nn.Module):
-    def __init__(self, device, lambda_l1=10.0, lambda_feat=5.0, lambda_adv=1.0): # 注意：降低了 feat 权重
+    def __init__(self, device, lambda_l1=10.0, lambda_feat=5.0, lambda_adv=1.0): 
         super(PhyGANLoss, self).__init__()
         self.device = device
         self.lambda_l1 = lambda_l1

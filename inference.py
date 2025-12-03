@@ -42,14 +42,14 @@ def downsample(tensor, scale_factor=4, is_flow=False):
     """
     模拟低分辨率输入: HR -> Downsample -> LR
     """
-    mode = 'bilinear' if is_flow else 'area'
+    mode = 'bilinear' if is_flow else 'bicubic'
     
     # F.interpolate 需要 [B, C, H, W]
     lr = F.interpolate(
         tensor, 
         scale_factor=1/scale_factor, 
         mode=mode,
-        align_corners=False if mode=='bilinear' else None,
+        align_corners=False if mode in ['bilinear', 'bicubic'] else None,
         recompute_scale_factor=True
     )
     

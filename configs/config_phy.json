@@ -8,6 +8,7 @@
         "sample_dir": "./samples/phygan_final*4"
     },
     "training": {
+        "warmup": 2,
         "batch_size": 4,
         "num_epochs": 15,
         "num_workers": 4,

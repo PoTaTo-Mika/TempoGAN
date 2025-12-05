@@ -19,7 +19,7 @@ from utils.utils import save_checkpoint, save_sample_images, AverageMeter
 # PhyGAN Loss: 专门为 PhyTempoGAN 定制的损失函数
 # ==============================================================================
 class PhyGANLoss(nn.Module):
-    def __init__(self, device, lambda_l1=10.0, lambda_feat=5.0, lambda_adv=1.0): # 注意：降低了 feat 权重
+    def __init__(self, device, lambda_l1=10.0, lambda_feat=5.0, lambda_adv=1.0):
         super(PhyGANLoss, self).__init__()
         self.device = device
         self.lambda_l1 = lambda_l1
@@ -28,22 +28,17 @@ class PhyGANLoss(nn.Module):
         
         self.criterion_l1 = nn.L1Loss()
         self.criterion_feat = nn.MSELoss()
-        # 移除了 self.criterion_gan = BCE...
 
     def calc_ds_loss(self, D_s, lr, hr, fake):
-        # Hinge Loss 判别器部分
-        # 真实样本要求 D(x) > 1, 虚假样本要求 D(G(z)) < -1
         real_pred, _ = D_s(lr, hr)
         fake_pred, _ = D_s(lr, fake.detach())
         
-        # ReLU 相当于 max(0, ...)
         loss_real = torch.mean(torch.nn.functional.relu(1.0 - real_pred))
         loss_fake = torch.mean(torch.nn.functional.relu(1.0 + fake_pred))
         
         return loss_real + loss_fake
 
     def calc_dt_loss(self, D_t, real_seq, fake_seq):
-        # Temporal 也是一样
         real_pred = D_t(real_seq)
         fake_pred = D_t(fake_seq.detach())
         
@@ -55,10 +50,9 @@ class PhyGANLoss(nn.Module):
     def calc_g_loss(self, D_s, D_t, lr, hr, gen, fake_seq):
         logs = {}
         
-        # 1. Adversarial Loss (Hinge for Generator)
-        # G 希望 D(G(z)) 越大越好 ( > 0)
+        # 1. Adversarial Loss
         pred_fake_s, feat_fake_s = D_s(lr, gen)
-        loss_adv_s = -torch.mean(pred_fake_s)  # 直接取负均值
+        loss_adv_s = -torch.mean(pred_fake_s)
         
         pred_fake_t = D_t(fake_seq)
         loss_adv_t = -torch.mean(pred_fake_t)
@@ -71,7 +65,6 @@ class PhyGANLoss(nn.Module):
             _, feat_real_s = D_s(lr, hr)
             
         loss_feat = 0.0
-        # 对特征层的权重稍微做点衰减，高层特征更抽象，权重可以小一点
         weights = [1.0, 1.0, 1.0, 1.0] 
         for i, (f_r, f_f) in enumerate(zip(feat_real_s, feat_fake_s)):
             loss_feat += self.criterion_feat(f_f, f_r) * weights[i]
@@ -89,6 +82,7 @@ class PhyGANLoss(nn.Module):
         logs['g_feat'] = loss_feat.item()
         
         return total_loss, logs
+
 # ==============================================================================
 # Helper Functions
 # ==============================================================================
@@ -138,7 +132,7 @@ def main():
         os.makedirs(config['paths']['log_dir'], exist_ok=True)
         print(f"Starting PhyGAN Training. Experiment: {config['experiment_name']}")
 
-    # 1. Dataset (使用 PhyTyphoonDataset，只加载图片序列)
+    # 1. Dataset
     dataset = PhyTyphoonDataset(
         json_path=config['paths']['json_path'],
         root_dir=config['paths']['data_root'],
@@ -157,18 +151,13 @@ def main():
     )
 
     # 2. Model Initialization
-    # Generator: PhyGenerator
     G = PhyGenerator(
         scale_factor=config['model']['scale_factor'],
-        in_channels=1, # 灰度图
+        in_channels=1,
         base_channels=64
     ).to(device)
     
-    # Ds: Spatial Discriminator (2D)
-    Ds = SpatialDiscriminator(input_channels=2).to(device) # LR+HR
-    
-    # Dt: Temporal Discriminator (3D)
-    # 输入通道=1 (灰度序列)
+    Ds = SpatialDiscriminator(input_channels=2).to(device)
     Dt = TemporalDiscriminator(input_channels=3).to(device)
 
     G.apply(weights_init)
@@ -193,19 +182,28 @@ def main():
 
     # 5. Loop
     global_step = 0
-    start_time = time.time()
     loss_m_G = AverageMeter()
     loss_m_Ds = AverageMeter()
     loss_m_Dt = AverageMeter()
+    
+    # 设置 Warmup Epochs 数量
+    WARMUP_EPOCHS = 3
 
     for epoch in range(config['training']['num_epochs']):
         if sampler:
             sampler.set_epoch(epoch)
             
+        # 判断当前是否为 Warmup 阶段
+        is_warmup = (epoch < WARMUP_EPOCHS)
+        
+        if rank == 0:
+            if is_warmup:
+                print(f"Epoch {epoch}: Warmup Mode (L1 Only).")
+            else:
+                print(f"Epoch {epoch}: Full GAN Training Mode.")
+            
         for i, batch in enumerate(dataloader):
-            # Input: [B, 3, 1, 128, 128] -> LR Sequence (t-1, t, t+1)
             lr_seq = batch['lr_seq'].to(device) 
-            # Target: [B, 3, 1, 512, 512] -> HR Sequence
             hr_seq = batch['hr_seq'].to(device)
 
             B, T, C, H_lr, W_lr = lr_seq.shape
@@ -214,68 +212,86 @@ def main():
             # -------------------------------------------------------
             # Step 1: Run Generator
             # -------------------------------------------------------
-            # G 接收序列，输出中间帧 t 的高分辨率预测
-            # Output: [B, 1, 512, 512]
+            # 无论什么阶段，G 都要跑前向
             gen_hr_center = G(lr_seq)
-
-            # -------------------------------------------------------
-            # Step 2: Construct Sequences for Dt
-            # -------------------------------------------------------
-            # Real Seq: 直接是 hr_seq [B, 3, 1, 512, 512]
-            # 需要 permute 成 [B, 1, 3, 512, 512] 适应 3D Conv
-            real_seq_3d = hr_seq
             
-            # Fake Seq: 组合 [Real_t-1, Fake_t, Real_t+1]
-            # 这种"补全任务"强迫生成的 t 帧在时间上连贯
-            fake_seq_list = [
-                hr_seq[:, 0],   # t-1
-                gen_hr_center,  # Generated t
-                hr_seq[:, 2]    # t+1
-            ]
-            fake_seq_stacked = torch.stack(fake_seq_list, dim=1) # [B, 3, 1, 512, 512]
-            fake_seq_3d = fake_seq_stacked
-
-            # -------------------------------------------------------
-            # Step 3: Update Discriminator Ds (Spatial)
-            # -------------------------------------------------------
-            # 准备 Ds 输入: Upsampled LR center + HR/Fake center
+            # 获取 LR 和 HR 的中间帧，用于 loss 计算
             lr_center = lr_seq[:, 1]
             lr_center_up = torch.nn.functional.interpolate(lr_center, size=(H_hr, W_hr), mode='nearest')
             hr_center = hr_seq[:, 1]
 
-            opt_Ds.zero_grad()
-            loss_Ds = criterion.calc_ds_loss(Ds, lr_center_up, hr_center, gen_hr_center.detach())
-            loss_Ds.backward()
-            opt_Ds.step()
+            # -------------------------------------------------------
+            # 分支逻辑：Warmup vs Normal
+            # -------------------------------------------------------
+            if is_warmup:
+                # ================= Warmup Phase =================
+                # 只计算 L1 Loss，不更新判别器，不计算特征损失
+                
+                loss_l1 = criterion.criterion_l1(gen_hr_center, hr_center)
+                
+                # 为了保持 loss 数量级一致，建议乘上 config 中的 lambda_l1
+                # 如果你想纯粹只是 L1，也可以去掉这个乘数，但为了后续切换顺滑，通常保留权重
+                loss_G = loss_l1 * criterion.lambda_l1
+                
+                opt_G.zero_grad()
+                loss_G.backward()
+                opt_G.step()
+                
+                # 记录日志 (其他项置零)
+                loss_Ds_val = 0.0
+                loss_Dt_val = 0.0
+                logs = {
+                    'g_l1': loss_l1.item(),
+                    'g_feat': 0.0,
+                    'g_adv_s': 0.0,
+                    'g_adv_t': 0.0
+                }
 
-            # -------------------------------------------------------
-            # Step 4: Update Discriminator Dt (Temporal)
-            # -------------------------------------------------------
-            opt_Dt.zero_grad()
-            loss_Dt = criterion.calc_dt_loss(Dt, real_seq_3d, fake_seq_3d.detach())
-            loss_Dt.backward()
-            opt_Dt.step()
+            else:
+                # ================= Normal Phase =================
+                # 包含 判别器更新 + Full GAN Loss
+                
+                # 构造序列用于 Dt
+                real_seq_3d = hr_seq
+                fake_seq_list = [
+                    hr_seq[:, 0],   # t-1
+                    gen_hr_center,  # Generated t
+                    hr_seq[:, 2]    # t+1
+                ]
+                fake_seq_3d = torch.stack(fake_seq_list, dim=1)
 
-            # -------------------------------------------------------
-            # Step 5: Update Generator
-            # -------------------------------------------------------
-            opt_G.zero_grad()
-            # 注意：传入未 detach 的 fake_seq_3d 以保留梯度
-            loss_G, logs = criterion.calc_g_loss(Ds, Dt, lr_center_up, hr_center, gen_hr_center, fake_seq_3d)
-            loss_G.backward()
-            opt_G.step()
+                # --- Update Ds ---
+                opt_Ds.zero_grad()
+                loss_Ds = criterion.calc_ds_loss(Ds, lr_center_up, hr_center, gen_hr_center.detach())
+                loss_Ds.backward()
+                opt_Ds.step()
+                loss_Ds_val = loss_Ds.item()
+
+                # --- Update Dt ---
+                opt_Dt.zero_grad()
+                loss_Dt = criterion.calc_dt_loss(Dt, real_seq_3d, fake_seq_3d.detach())
+                loss_Dt.backward()
+                opt_Dt.step()
+                loss_Dt_val = loss_Dt.item()
+
+                # --- Update G ---
+                opt_G.zero_grad()
+                loss_G, logs = criterion.calc_g_loss(Ds, Dt, lr_center_up, hr_center, gen_hr_center, fake_seq_3d)
+                loss_G.backward()
+                opt_G.step()
 
             # -------------------------------------------------------
             # Logging
             # -------------------------------------------------------
             loss_m_G.update(loss_G.item())
-            loss_m_Ds.update(loss_Ds.item())
-            loss_m_Dt.update(loss_Dt.item())
+            loss_m_Ds.update(loss_Ds_val)
+            loss_m_Dt.update(loss_Dt_val)
             global_step += 1
 
             if rank == 0:
                 if global_step % config['training']['log_interval'] == 0:
-                    print(f"Ep [{epoch}/{config['training']['num_epochs']}] "
+                    status = "Warmup" if is_warmup else "GAN"
+                    print(f"[{status}] Ep [{epoch}/{config['training']['num_epochs']}] "
                           f"Step [{i}/{len(dataloader)}] "
                           f"L_G:{loss_m_G.avg:.3f} L_Ds:{loss_m_Ds.avg:.3f} L_Dt:{loss_m_Dt.avg:.3f} "
                           f"L1:{logs['g_l1']:.3f} Feat:{logs['g_feat']:.3f}")
@@ -284,23 +300,12 @@ def main():
                     loss_m_Dt.reset()
 
                 if global_step % config['training']['eval_interval'] == 0:
-
-                    # 问题原因：utils.py 默认取 index=1 的帧（中间帧）
-                    # 解决方法：构造一个伪造的时间序列 [B, 3, C, H, W]
-                    
-                    # 1. 对生成结果：简单地重复3次堆叠起来，这样取 index 1 依然是它自己
-                    # gen_hr_center: [B, 1, 512, 512] -> [B, 3, 1, 512, 512]
                     gen_seq_vis = torch.stack([gen_hr_center, gen_hr_center, gen_hr_center], dim=1)
-                    
-                    # 2. 对输入和真值：直接传整个序列进去，utils.py 会自动取 index 1
-                    # lr_seq: [B, 3, 1, 128, 128]
-                    # hr_seq: [B, 3, 1, 512, 512]
-                    
                     save_sample_images(
                         global_step, 
-                        lr_seq,       # 直接传原版序列
-                        hr_seq,       # 直接传原版序列
-                        gen_seq_vis,  # 传伪造的序列
+                        lr_seq,
+                        hr_seq,
+                        gen_seq_vis,
                         config['paths']['sample_dir']
                     )
 
